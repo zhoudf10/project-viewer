@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 车间 · 项目索引</title>
+<link rel="icon" type="image/png" href="system/logo.png">
+<link rel="stylesheet" href="system/styles.css">
+</head>
+<body class="page-list">
+  <header class="list-header">
+    <div class="list-eyebrow">
+      <img class="brand-logo" src="system/logo.png" alt="AI 车间">
+      <span>AI 车间</span>
+    </div>
+    <h1>代码知识图谱</h1>
+    <p>所有已分析的项目都在这里。每张卡片对应 <code>datas/</code> 下的一个目录，点击进入可视化查看器。</p>
+  </header>
+
+  <div class="list-toolbar">
+    <div class="search-box">
+      <input id="filter" type="search" placeholder="按项目名、语言或框架过滤" autocomplete="off">
+    </div>
+    <span class="list-count" id="list-count"></span>
+  </div>
+
+  <main id="project-grid" class="project-grid"></main>
+  <nav id="pager" class="pager" aria-label="项目分页" hidden></nav>
+  <div id="empty-state" class="empty-state" hidden>
+    没有可显示的项目。请把分析结果放到 <code>datas/&lt;项目名&gt;/.ai_machine/</code>，
+    然后运行 <code>python bliud.py</code> 重新生成数据。
+  </div>
+
+  <script src="system/manifest.js"></script>
+  <script src="system/list.js"></script>
+</body>
+</html>

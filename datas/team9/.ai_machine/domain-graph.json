@@ -1,0 +1,3481 @@
+{
+ "version": "1.0.0",
+ "project": {
+  "name": "team9",
+  "languages": [
+   "TypeScript",
+   "Rust",
+   "SQL",
+   "HCL"
+  ],
+  "frameworks": [
+   "NestJS",
+   "React",
+   "Tauri",
+   "Drizzle ORM",
+   "Socket.IO",
+   "RabbitMQ",
+   "Redis",
+   "gRPC",
+   "OpenTelemetry"
+  ],
+  "description": "Team9 是基于 OpenClaw 的 AI agent 团队协作工作区：以频道式 IM 为协作底座，AI 员工/agent 作为团队成员参与会话，例程与任务调度承担自动化，Wiki 与文档沉淀知识，工作区与订阅承担多租户与商业化。",
+  "analyzedAt": "2026-11-18T12:53:37.808091+00:00",
+  "gitCommitHash": "fed6f8eeef9e8d97ec9b8a26f0306ca92274065b"
+ },
+ "nodes": [
+  {
+   "id": "domain:team-im-collaboration",
+   "type": "domain",
+   "name": "团队协作与即时消息",
+   "summary": "团队在频道、私信与主题会话中协作的完整链路：频道与成员权限、消息清洗落库与序号分配、多端增量同步与已读回执、消息视图与看板、@提及后的通知投递。",
+   "tags": [
+    "im",
+    "channel",
+    "message",
+    "realtime",
+    "notification"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entities": [
+     "频道",
+     "频道成员",
+     "消息",
+     "消息属性",
+     "视图",
+     "分区",
+     "已读位点",
+     "通知"
+    ],
+    "businessRules": [
+     "每个频道的 seqId 单调递增，客户端以 seq 游标做增量同步，缺失时从 MAX(seq_id) 恢复并用 SETNX 播种",
+     "消息内容先做 HTML 清洗再归一化 Lexical AST，AST 有大小、节点数、深度上限",
+     "有效角色取显式成员角色与 bot/租户角色中较高者，决定消息可见性与操作权限",
+     "外发投递走 Outbox，未确认事件由后台扫描补发，避免消息丢失"
+    ],
+    "crossDomainInteractions": [
+     "@提及与主题会话把消息交给 AI agent 域处理",
+     "例程执行结果与安装通知通过频道广播回到协作域"
+    ]
+   }
+  },
+  {
+   "id": "flow:send-channel-message",
+   "type": "flow",
+   "name": "发送频道消息",
+   "summary": "用户或 bot 在频道发送消息：校验权限、清洗富文本、写入并分配频道序号，再经 Outbox 路由到在线网关并派生未读数与通知。",
+   "tags": [
+    "im",
+    "message",
+    "outbox"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /im/channels/:channelId/messages",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:send-channel-message:verify-channel-membership",
+   "type": "step",
+   "name": "校验频道与成员权限",
+   "summary": "读取有效成员角色，确认发送者属于频道且具备发言权限。",
+   "tags": [
+    "auth",
+    "channel"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/channels/effective-membership.ts"
+  },
+  {
+   "id": "step:send-channel-message:sanitize-message-content",
+   "type": "step",
+   "name": "清洗富文本并归一化 AST",
+   "summary": "对消息内容做 HTML 清洗，校验并归一化 Lexical AST，纯文本回退为 AST。",
+   "tags": [
+    "sanitize",
+    "ast"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/messages/utils/sanitize-content.ts"
+  },
+  {
+   "id": "step:send-channel-message:persist-and-sequence",
+   "type": "step",
+   "name": "消息落库并分配频道序号",
+   "summary": "按 clientMsgId 去重后写入消息表，用 Redis 自增分配频道 seqId 并更新最近消息缓存。",
+   "tags": [
+    "message",
+    "sequence",
+    "redis"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/im-worker/src/message/message.service.ts"
+  },
+  {
+   "id": "step:send-channel-message:route-to-online-gateway",
+   "type": "step",
+   "name": "路由到在线网关队列",
+   "summary": "按 Redis 中用户到网关节点的映射对目标成员分组，投递到对应网关队列并区分在线/离线。",
+   "tags": [
+    "routing",
+    "redis",
+    "gateway"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/im-worker/src/message/message-router.service.ts"
+  },
+  {
+   "id": "step:send-channel-message:broadcast-and-fanout",
+   "type": "step",
+   "name": "广播并派生未读与通知",
+   "summary": "经 WebSocket 广播新消息，更新未读计数、派生通知任务并处理 bot webhook 推送。",
+   "tags": [
+    "websocket",
+    "fanout",
+    "unread"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/im-worker/src/post-broadcast/post-broadcast.service.ts"
+  },
+  {
+   "id": "flow:sync-and-read-receipt",
+   "type": "flow",
+   "name": "多端增量同步与已读回执",
+   "summary": "客户端断线重连后按频道 seq 游标补齐消息，回报 ACK 位点，服务端维护送达/已读状态与在线状态广播。",
+   "tags": [
+    "sync",
+    "ack",
+    "presence"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "GET /im/sync?channelId&sinceSeq / POST /im/sync/ack",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:sync-and-read-receipt:pull-by-channel-cursor",
+   "type": "step",
+   "name": "按频道游标拉取新消息",
+   "summary": "客户端携带各频道 sincSeq 请求增量消息，服务端校验频道成员资格。",
+   "tags": [
+    "sync",
+    "cursor"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/sync/sync.controller.ts"
+  },
+  {
+   "id": "step:sync-and-read-receipt:replenish-sender-info",
+   "type": "step",
+   "name": "补全发送者并维护同步位点",
+   "summary": "按 seq 从数据库取消息、批量补全发送者信息，写回缓存中的同步位点与频道最大 seq。",
+   "tags": [
+    "sync",
+    "cache"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/sync/sync.service.ts"
+  },
+  {
+   "id": "step:sync-and-read-receipt:report-client-ack",
+   "type": "step",
+   "name": "客户端上报同步 ACK",
+   "summary": "客户端提交已拉取到的 seq，前端 IM 服务调用同步 ACK 接口。",
+   "tags": [
+    "ack",
+    "client"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/client/src/services/api/im.ts"
+  },
+  {
+   "id": "step:sync-and-read-receipt:track-delivery-read-state",
+   "type": "step",
+   "name": "维护送达与已读状态",
+   "summary": "在 Redis 中维护消息送达/已读状态与用户待确认队列，处理已读回执。",
+   "tags": [
+    "ack",
+    "redis",
+    "read-receipt"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/im-worker/src/ack/ack.service.ts"
+  },
+  {
+   "id": "step:sync-and-read-receipt:refresh-online-presence",
+   "type": "step",
+   "name": "刷新在线状态并广播",
+   "summary": "网关更新用户在线状态并向工作区成员广播在线变更事件。",
+   "tags": [
+    "presence",
+    "websocket"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/websocket/websocket.gateway.ts"
+  },
+  {
+   "id": "flow:channel-view-board",
+   "type": "flow",
+   "name": "消息视图与看板呈现",
+   "summary": "把频道内的消息当作结构化记录：播种标签、创建表格/看板视图、按筛选排序分组查询，并绑定自定义属性呈现。",
+   "tags": [
+    "views",
+    "board",
+    "properties"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "GET /im/channels/:channelId/views/:viewId/messages",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:channel-view-board:seed-channel-tabs",
+   "type": "step",
+   "name": "播种频道内置标签",
+   "summary": "首次访问时创建消息/文件/表格/看板/日历等内置标签并维护排序。",
+   "tags": [
+    "tabs",
+    "seed"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/views/tabs.service.ts"
+  },
+  {
+   "id": "step:channel-view-board:create-view-config",
+   "type": "step",
+   "name": "创建视图并校验配置",
+   "summary": "创建 table/board/calendar 视图，校验筛选、排序、分组等嵌套 ViewConfig。",
+   "tags": [
+    "views",
+    "config"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/views/views.service.ts"
+  },
+  {
+   "id": "step:channel-view-board:query-by-filter-sort",
+   "type": "step",
+   "name": "按筛选与排序查询消息",
+   "summary": "按视图配置过滤、分组、分页查询消息并返回树形快照。",
+   "tags": [
+    "query",
+    "pagination"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/im/views/views.controller.ts"
+  },
+  {
+   "id": "step:channel-view-board:bind-message-properties",
+   "type": "step",
+   "name": "绑定消息自定义属性",
+   "summary": "按属性定义校验并规范化值，维护属性驱动的消息指向关系后广播事件。",
+   "tags": [
+    "properties",
+    "relations"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/im/properties/message-properties.service.ts"
+  },
+  {
+   "id": "step:channel-view-board:render-table-board",
+   "type": "step",
+   "name": "渲染表格与看板视图",
+   "summary": "前端按视图配置把消息渲染成表格或看板列。",
+   "tags": [
+    "ui",
+    "board"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/client/src/components/channel/views/BoardView.tsx"
+  },
+  {
+   "id": "flow:mention-notification-delivery",
+   "type": "flow",
+   "name": "@提及与通知投递",
+   "summary": "消息创建后解析 @提及并派生通知任务，落库后通过 WebSocket、Web Push 与 Expo 多通道下发，失败时清理失效订阅。",
+   "tags": [
+    "mention",
+    "notification",
+    "push"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "message.created 事件 → im-worker 通知触发",
+    "entryType": "event"
+   }
+  },
+  {
+   "id": "step:mention-notification-delivery:parse-mentions",
+   "type": "step",
+   "name": "解析文本 @提及",
+   "summary": "从消息文本中提取被提及用户 ID 集合并识别 @all 广播。",
+   "tags": [
+    "mention",
+    "parser"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/shared/utils/mention-parser.ts"
+  },
+  {
+   "id": "step:mention-notification-delivery:derive-notification-task",
+   "type": "step",
+   "name": "派生提及/回复/私信通知任务",
+   "summary": "把提及、回复、私信、邀请与成员变动等事件转成通知记录并投递到 RabbitMQ。",
+   "tags": [
+    "notification",
+    "rabbitmq"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/im-worker/src/notification/notification-trigger.service.ts"
+  },
+  {
+   "id": "step:mention-notification-delivery:persist-notification",
+   "type": "step",
+   "name": "通知落库并判定优先级",
+   "summary": "单条或批量写入通知，判定优先级并清理过期记录。",
+   "tags": [
+    "notification",
+    "persistence"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/im-worker/src/notification/notification.service.ts"
+  },
+  {
+   "id": "step:mention-notification-delivery:multi-channel-delivery",
+   "type": "step",
+   "name": "多通道下发通知",
+   "summary": "通过 WebSocket 实时推送、Web Push 与 Expo 移动推送下发，并广播未读数变更。",
+   "tags": [
+    "delivery",
+    "websocket",
+    "expo"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/notification/notification-delivery.service.ts"
+  },
+  {
+   "id": "step:mention-notification-delivery:web-push-fallback",
+   "type": "step",
+   "name": "Web Push 兜底推送",
+   "summary": "向用户浏览器订阅端点发送通知，失败时清理失效订阅。",
+   "tags": [
+    "web-push",
+    "vapid"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/notification/web-push.service.ts"
+  },
+  {
+   "id": "domain:ai-agent-workforce",
+   "type": "domain",
+   "name": "AI 员工与 agent 集成",
+   "summary": "把 AI 员工当作团队成员引入工作区：应用安装处理器创建 bot 影子用户与频道，agent 通过 bot token 参与频道会话、流式回传输出，并可通过 Ahand 设备与 OpenClaw 实例在远端执行。",
+   "tags": [
+    "agent",
+    "bot",
+    "openclaw",
+    "ahand",
+    "claw-hive"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entities": [
+     "应用",
+     "安装记录",
+     "bot",
+     "agent 会话",
+     "主题会话",
+     "Ahand 设备",
+     "OpenClaw 实例",
+     "人员工位"
+    ],
+    "businessRules": [
+     "bot 以影子用户身份存在，访问令牌使用 t9bot_ 前缀且校验结果走内存+Redis 两级缓存",
+     "安装 OpenClaw 失败时回滚已创建的机器人与实例，避免残留",
+     "agent 只能访问自己所属 bot 的会话、技能与目录，绑定关系必须校验 tenant/bot 归属",
+     "agent 会话事件下发前按键名模式递归脱敏"
+    ],
+    "crossDomainInteractions": [
+     "频道 @mention 会创建主题会话并绑定 agent",
+     "安装应用的动作由应用市场域发起",
+     "agent 读写文档与技能由知识库域提供权限门控"
+    ]
+   }
+  },
+  {
+   "id": "flow:install-ai-staff",
+   "type": "flow",
+   "name": "安装 AI 员工",
+   "summary": "从应用目录选择一个 AI 员工应用，按类型分派安装处理器，创建 bot 影子用户与员工频道，生成人设头像后落安装记录并广播。",
+   "tags": [
+    "applications",
+    "staff",
+    "bot"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /applications/:appId/install",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:install-ai-staff:browse-application-catalog",
+   "type": "step",
+   "name": "浏览应用目录",
+   "summary": "列出全部/可见应用并支持按 ID 查询详情。",
+   "tags": [
+    "catalog",
+    "applications"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/applications/applications.service.ts"
+  },
+  {
+   "id": "step:install-ai-staff:dispatch-install-handler",
+   "type": "step",
+   "name": "分派安装处理器",
+   "summary": "按应用类型注册表选出 handler，执行安装/卸载回调契约。",
+   "tags": [
+    "handler",
+    "install"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/handlers/index.ts"
+  },
+  {
+   "id": "step:install-ai-staff:create-bot-shadow-user",
+   "type": "step",
+   "name": "创建 bot 影子用户与令牌",
+   "summary": "创建 bot 影子用户与扩展记录，签发 t9bot_ 访问令牌并维护 webhook 绑定。",
+   "tags": [
+    "bot",
+    "token"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/bot/bot.service.ts"
+  },
+  {
+   "id": "step:install-ai-staff:generate-persona-avatar",
+   "type": "step",
+   "name": "生成人设与头像",
+   "summary": "调用 LLM 生成岗位人设文案与头像，写入 bot 员工档案。",
+   "tags": [
+    "llm",
+    "persona"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/personal-staff.service.ts"
+  },
+  {
+   "id": "step:install-ai-staff:record-installation",
+   "type": "step",
+   "name": "落安装记录并脱敏",
+   "summary": "写入安装记录、做重复与配额校验，按租户查询时脱敏 secrets。",
+   "tags": [
+    "installation",
+    "quota"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/installed-applications.service.ts"
+  },
+  {
+   "id": "step:install-ai-staff:notify-websocket",
+   "type": "step",
+   "name": "推送安装结果",
+   "summary": "向工作区成员广播员工上线与频道变更通知。",
+   "tags": [
+    "websocket",
+    "notify"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/websocket/websocket.gateway.ts"
+  },
+  {
+   "id": "flow:install-recommended-staff",
+   "type": "flow",
+   "name": "一键安装推荐员工",
+   "summary": "Agent Hub 拉取 claw-hive 预制员工模板并缓存，用分布式锁防止重复安装，创建 bot 与导师直聊频道后注册 Hive agent。",
+   "tags": [
+    "agent-hub",
+    "claw-hive",
+    "template"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /agent-hub/install",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:install-recommended-staff:list-recommended-staff",
+   "type": "step",
+   "name": "列出推荐员工模板",
+   "summary": "校验租户 ID 后返回推荐员工列表。",
+   "tags": [
+    "agent-hub",
+    "catalog"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/agent-hub/agent-hub.controller.ts"
+  },
+  {
+   "id": "step:install-recommended-staff:fetch-hive-templates",
+   "type": "step",
+   "name": "拉取并缓存预制模板",
+   "summary": "从 claw-hive 拉取模板、归一化结构并按 TTL 缓存。",
+   "tags": [
+    "cache",
+    "claw-hive"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/agent-hub/agent-hub.service.ts"
+  },
+  {
+   "id": "step:install-recommended-staff:create-bot-and-mentor-channel",
+   "type": "step",
+   "name": "创建 bot 与导师直聊频道",
+   "summary": "按模板创建 bot、导师直聊频道，并用 Redis 分布式锁防止重复安装。",
+   "tags": [
+    "bot",
+    "channel",
+    "lock"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/applications/handlers/agent-hub.handler.ts"
+  },
+  {
+   "id": "step:install-recommended-staff:register-hive-agent",
+   "type": "step",
+   "name": "注册 Hive agent",
+   "summary": "调用 Hive 平台 API 注册 agent 并建立会话。",
+   "tags": [
+    "claw-hive",
+    "agent"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/libs/claw-hive/src/claw-hive.service.ts"
+  },
+  {
+   "id": "flow:agent-topic-session",
+   "type": "flow",
+   "name": "与 agent 的主题会话",
+   "summary": "用户发起与 agent 的一对一会话：创建主题频道与首条消息、绑定 agent 会话，agent 以 bot 身份流式回传正文与思考，结束后落库并自动命名。",
+   "tags": [
+    "topic-session",
+    "streaming",
+    "agent"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /im/topic-sessions",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:agent-topic-session:create-topic-channel",
+   "type": "step",
+   "name": "创建主题会话频道与首条消息",
+   "summary": "创建 topic 类型频道、写入首条用户消息，失败时执行补偿逻辑。",
+   "tags": [
+    "topic",
+    "channel"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/topic-sessions/topic-sessions.service.ts"
+  },
+  {
+   "id": "step:agent-topic-session:bind-agent-session",
+   "type": "step",
+   "name": "解析并绑定 agent 会话",
+   "summary": "把频道、例程会话、任务运行解析成 agent 会话绑定并校验 bot/租户归属。",
+   "tags": [
+    "binding",
+    "agent"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/im/agent-sessions/agent-session-binding.service.ts"
+  },
+  {
+   "id": "step:agent-topic-session:authenticate-bot-token",
+   "type": "step",
+   "name": "校验 bot 访问令牌",
+   "summary": "agent 每次请求以 bot token 鉴权，命中内存 LRU 或 Redis 缓存。",
+   "tags": [
+    "auth",
+    "bot-token"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/bot/bot-auth-cache.service.ts"
+  },
+  {
+   "id": "step:agent-topic-session:stream-agent-output",
+   "type": "step",
+   "name": "流式回传正文与思考",
+   "summary": "开启流并增量更新正文/思考/元数据，结束后落库为正式消息。",
+   "tags": [
+    "streaming",
+    "redis"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/im/streaming/streaming.controller.ts"
+  },
+  {
+   "id": "step:agent-topic-session:finalize-message",
+   "type": "step",
+   "name": "落库最终消息",
+   "summary": "把流式快照合并后写入消息表并广播，元数据剔除瞬时字段。",
+   "tags": [
+    "message",
+    "persistence"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/im/messages/messages.service.ts"
+  },
+  {
+   "id": "step:agent-topic-session:auto-generate-title",
+   "type": "step",
+   "name": "自动生成会话标题",
+   "summary": "取首条用户消息调用短标题生成器并回写会话标题。",
+   "tags": [
+    "llm",
+    "title"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/topic-sessions/topic-title-generator.service.ts"
+  },
+  {
+   "id": "flow:connect-ahand-device",
+   "type": "flow",
+   "name": "接入 Ahand 远程设备",
+   "summary": "用户把本地设备注册到 Ahand，会话启动时把设备能力注入蓝图，设备事件经 webhook 校验去重后发布到 Redis 并推给客户端，任务结果走 SSE 回传。",
+   "tags": [
+    "ahand",
+    "device",
+    "webhook"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /ahand/devices + POST /ahand/webhook",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:connect-ahand-device:register-device-token",
+   "type": "step",
+   "name": "注册设备并铸造令牌",
+   "summary": "登记设备信息并签发/刷新设备与控制面令牌，维护最后在线时间。",
+   "tags": [
+    "device",
+    "token"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/ahand/ahand.service.ts"
+  },
+  {
+   "id": "step:connect-ahand-device:extend-session-blueprint",
+   "type": "step",
+   "name": "会话蓝图注入设备能力",
+   "summary": "会话启动时解析调用端与在线设备，把 ahand 组件注入会话蓝图。",
+   "tags": [
+    "blueprint",
+    "session"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/im-worker/src/ahand/ahand-blueprint.extender.ts"
+  },
+  {
+   "id": "step:connect-ahand-device:verify-webhook-signature",
+   "type": "step",
+   "name": "校验 webhook 签名并去重",
+   "summary": "校验设备中心 webhook 签名，用 Redis 去重后按事件类型处理设备与任务状态。",
+   "tags": [
+    "webhook",
+    "hmac"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/ahand/ahand-webhook.service.ts"
+  },
+  {
+   "id": "step:connect-ahand-device:publish-device-events",
+   "type": "step",
+   "name": "发布设备事件到 Redis",
+   "summary": "把 owner 维度的事件发布到 Redis 频道供网关订阅。",
+   "tags": [
+    "redis",
+    "pubsub"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/ahand/ahand-redis-publisher.service.ts"
+  },
+  {
+   "id": "step:connect-ahand-device:push-to-owner-room",
+   "type": "step",
+   "name": "按 owner 房间推送事件",
+   "summary": "Socket.IO 网关把设备与任务事件推给对应 owner 房间。",
+   "tags": [
+    "websocket",
+    "room"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/ahand/ahand-events.gateway.ts"
+  },
+  {
+   "id": "step:connect-ahand-device:relay-job-stream",
+   "type": "step",
+   "name": "透传任务 SSE 流",
+   "summary": "校验 token 后解析上游 SSE 记录并转换为 Team9 事件名下发。",
+   "tags": [
+    "sse",
+    "stream"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/ahand/ahand-job-stream.controller.ts"
+  },
+  {
+   "id": "flow:openclaw-instance-lifecycle",
+   "type": "flow",
+   "name": "OpenClaw 实例生命周期",
+   "summary": "以应用形式安装 OpenClaw：创建实例与工作区机器人、为成员批量开私聊，之后可查询实例活跃度、启停重启，并在任务执行时选用 OpenClaw 策略。",
+   "tags": [
+    "openclaw",
+    "instance",
+    "lifecycle"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /applications/openclaw/install | POST /installed-applications/:id/restart",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:openclaw-instance-lifecycle:install-openclaw-app",
+   "type": "step",
+   "name": "安装 OpenClaw 并创建实例",
+   "summary": "创建工作区机器人与 OpenClaw 实例，失败时回滚机器人。",
+   "tags": [
+    "openclaw",
+    "install"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/applications/handlers/openclaw.handler.ts"
+  },
+  {
+   "id": "step:openclaw-instance-lifecycle:open-dm-channels",
+   "type": "step",
+   "name": "为成员批量开私聊",
+   "summary": "以 bot 身份为租户人类成员创建私聊频道并广播创建事件。",
+   "tags": [
+    "dm",
+    "channel"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/bot/channels/bot-channels.controller.ts"
+  },
+  {
+   "id": "step:openclaw-instance-lifecycle:query-instance-activity",
+   "type": "step",
+   "name": "汇总实例活跃度与消息",
+   "summary": "代理远端 OpenClaw API，并用 SQL 汇总工作区最后消息、实例活跃度与会话记录。",
+   "tags": [
+    "openclaw",
+    "analytics"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/openclaw/openclaw.service.ts"
+  },
+  {
+   "id": "step:openclaw-instance-lifecycle:restart-instance",
+   "type": "step",
+   "name": "启停或重启实例",
+   "summary": "通过已安装应用接口对 OpenClaw 实例执行启动、停止与重启。",
+   "tags": [
+    "lifecycle",
+    "openclaw"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/installed-applications.controller.ts"
+  },
+  {
+   "id": "step:openclaw-instance-lifecycle:run-openclaw-strategy",
+   "type": "step",
+   "name": "执行期选用 OpenClaw 策略",
+   "summary": "执行器按策略键选择 OpenClaw 后端，完成执行、暂停、恢复与停止。",
+   "tags": [
+    "strategy",
+    "executor"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/task-worker/src/executor/strategies/openclaw.strategy.ts"
+  },
+  {
+   "id": "domain:routine-automation",
+   "type": "domain",
+   "name": "例程自动化与任务调度",
+   "summary": "把重复性工作沉淀为例程（routine）：创建时生成 folder9 文件夹与 SKILL.md，按时间/频道消息触发，task-worker 拉取命令并选择执行策略，执行过程通过 SSE 与人工干预回传。",
+   "tags": [
+    "routine",
+    "scheduler",
+    "task-worker",
+    "automation"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entities": [
+     "例程",
+     "触发器",
+     "执行记录",
+     "执行步骤",
+     "人工干预",
+     "交付物",
+     "任务运行",
+     "SKILL.md"
+    ],
+    "businessRules": [
+     "所有公开例程入口先保证 folder_id 非空，缺失时惰性补建并回写",
+     "触发时间按每日/每周/每月/每年/工作日规则结合时区换算，调度器用 Redis 分布式锁互斥",
+     "执行超过 24 小时仍为 in_progress 的任务运行会被标记超时",
+     "bot 上报步骤与状态必须校验 bot 与例程的归属关系"
+    ],
+    "crossDomainInteractions": [
+     "例程文件夹与技能文档由知识库域提供存储与权限",
+     "执行进度与结果通过频道消息回到协作域",
+     "任务执行最终由 AI agent 域的策略后端完成"
+    ]
+   }
+  },
+  {
+   "id": "flow:create-routine-with-skill",
+   "type": "flow",
+   "name": "创建例程并生成 SKILL.md",
+   "summary": "创建例程记录后惰性保证 folder9 目录、合成并校验 SKILL.md 提交首版，签发目录令牌并广播例程变更。",
+   "tags": [
+    "routine",
+    "folder9",
+    "skill-md"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /routines",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:create-routine-with-skill:create-routine-record",
+   "type": "step",
+   "name": "创建例程与调度配置",
+   "summary": "写入例程本体与调度配置，投递 RabbitMQ 事件并 WS 广播。",
+   "tags": [
+    "routine",
+    "crud"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/routines/routines.service.ts"
+  },
+  {
+   "id": "step:create-routine-with-skill:ensure-routine-folder",
+   "type": "step",
+   "name": "惰性保证 folder9 目录",
+   "summary": "检查 routine.folder_id，缺失时调用供给器补建并回写。",
+   "tags": [
+    "folder9",
+    "invariant"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/folder/ensure-routine-folder.ts"
+  },
+  {
+   "id": "step:create-routine-with-skill:provision-skill-md",
+   "type": "step",
+   "name": "合成并提交 SKILL.md",
+   "summary": "由例程行合成确定性 SKILL.md，创建 managed 目录并提交首版。",
+   "tags": [
+    "skill-md",
+    "provision"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/folder/provision-routine-folder.ts"
+  },
+  {
+   "id": "step:create-routine-with-skill:validate-skill-md",
+   "type": "step",
+   "name": "校验 SKILL.md 结构",
+   "summary": "解析 frontmatter 的 name/description 并校验正文长度约束。",
+   "tags": [
+    "validation",
+    "frontmatter"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/routines/folder/validate-skill-md.ts"
+  },
+  {
+   "id": "step:create-routine-with-skill:issue-folder-token",
+   "type": "step",
+   "name": "签发 folder9 访问令牌",
+   "summary": "校例程/技能/文档访问权限后向 folder9 申请令牌并缓存。",
+   "tags": [
+    "token",
+    "permission"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/folder9/folder-token.service.ts"
+  },
+  {
+   "id": "step:create-routine-with-skill:broadcast-routine-change",
+   "type": "step",
+   "name": "广播例程变更",
+   "summary": "向订阅客户端推送例程变更与执行事件。",
+   "tags": [
+    "websocket",
+    "events"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/routines/routines-stream.controller.ts"
+  },
+  {
+   "id": "flow:scheduled-routine-run",
+   "type": "flow",
+   "name": "定时触发例程执行",
+   "summary": "调度器轮询触发器并加锁，把到期的例程执行命令投递给 task-worker，执行器选择策略运行，agent 逐步回传状态并由 SSE 呈现。",
+   "tags": [
+    "scheduler",
+    "executor",
+    "cron"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "task-worker scheduler 轮询 routine_triggers",
+    "entryType": "cron"
+   }
+  },
+  {
+   "id": "step:scheduled-routine-run:configure-trigger-schedule",
+   "type": "step",
+   "name": "配置触发器并计算下次运行",
+   "summary": "校验调度配置并按时间规则结合时区计算下一次触发时间。",
+   "tags": [
+    "trigger",
+    "schedule"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/routine-triggers.service.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:poll-triggers-with-lock",
+   "type": "step",
+   "name": "轮询触发器并加分布式锁",
+   "summary": "定时轮询到期触发器，用 Redis 锁互斥后交给执行器运行例程。",
+   "tags": [
+    "scheduler",
+    "redis-lock"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/task-worker/src/scheduler/scheduler.service.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:dispatch-command",
+   "type": "step",
+   "name": "投递执行命令到消息总线",
+   "summary": "把例程/任务事件发布到消息总线并转发状态转换。",
+   "tags": [
+    "rabbitmq",
+    "taskcast"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/taskcast.service.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:consume-execution-command",
+   "type": "step",
+   "name": "消费执行命令",
+   "summary": "从 RabbitMQ 监听执行命令并转交执行器。",
+   "tags": [
+    "consumer",
+    "rabbitmq"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/task-worker/src/consumer/task-command.consumer.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:select-execution-strategy",
+   "type": "step",
+   "name": "按策略键选择执行后端",
+   "summary": "执行器按策略键选 Hive 或 OpenClaw，管理执行、暂停、恢复、停止与失败标记。",
+   "tags": [
+    "strategy",
+    "executor"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/task-worker/src/executor/executor.service.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:report-steps-status",
+   "type": "step",
+   "name": "上报步骤与执行状态",
+   "summary": "bot 侧上报步骤状态、错误与交付物，服务端统计 token 并流转状态。",
+   "tags": [
+    "report",
+    "status"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/routines/routine-bot.service.ts"
+  },
+  {
+   "id": "step:scheduled-routine-run:stream-progress",
+   "type": "step",
+   "name": "前端呈现执行时间线",
+   "summary": "客户端按执行步骤渲染时间线并随 SSE 增量刷新。",
+   "tags": [
+    "ui",
+    "timeline"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/client/src/components/routines/StepTimeline.tsx"
+  },
+  {
+   "id": "flow:channel-message-trigger",
+   "type": "flow",
+   "name": "频道消息触发任务",
+   "summary": "任务运行被创建后，频道消息按配置规则匹配触发任务，拉起 claw-hive 会话执行；长时间未完成的任务由超时扫描与 TaskCast 回调收口。",
+   "tags": [
+    "task",
+    "channel-trigger",
+    "claw-hive"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "message.created 事件 → task-worker channel-trigger",
+    "entryType": "event"
+   }
+  },
+  {
+   "id": "step:channel-message-trigger:create-task-run",
+   "type": "step",
+   "name": "创建任务运行与任务频道",
+   "summary": "创建任务运行、建立任务频道与初始消息并维护状态流转。",
+   "tags": [
+    "task",
+    "channel"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/tasks/tasks.service.ts"
+  },
+  {
+   "id": "step:channel-message-trigger:match-channel-trigger-rules",
+   "type": "step",
+   "name": "匹配频道触发规则",
+   "summary": "订阅消息事件，按渠道配置规则筛选后唤起任务执行。",
+   "tags": [
+    "trigger",
+    "rules"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/task-worker/src/channel-trigger/channel-trigger.service.ts"
+  },
+  {
+   "id": "step:channel-message-trigger:start-hive-session",
+   "type": "step",
+   "name": "拉起 Hive 会话",
+   "summary": "把执行上下文转换成 Hive 会话请求，支持暂停、恢复与停止。",
+   "tags": [
+    "claw-hive",
+    "session"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/task-worker/src/executor/strategies/hive.strategy.ts"
+  },
+  {
+   "id": "step:channel-message-trigger:track-task-timeout",
+   "type": "step",
+   "name": "扫描超时任务",
+   "summary": "每 5 分钟扫描超过 24 小时仍进行中的任务运行并标记超时。",
+   "tags": [
+    "timeout",
+    "scan"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/task-worker/src/timeout/timeout.service.ts"
+  },
+  {
+   "id": "step:channel-message-trigger:handle-taskcast-webhook",
+   "type": "step",
+   "name": "处理 TaskCast 回调",
+   "summary": "校验共享密钥后解析 runId 并回写超时状态。",
+   "tags": [
+    "webhook",
+    "taskcast"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/task-worker/src/webhook/webhook.controller.ts"
+  },
+  {
+   "id": "flow:routine-intervention-deliverable",
+   "type": "flow",
+   "name": "人工干预与交付物登记",
+   "summary": "执行过程中遇到需要人决策的节点时创建干预单并暂停，人工处理后恢复执行，最终登记交付物或完成创建型例程。",
+   "tags": [
+    "intervention",
+    "deliverable",
+    "approval"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /routines/:id/interventions",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:routine-intervention-deliverable:create-intervention",
+   "type": "step",
+   "name": "创建人工干预单",
+   "summary": "声明干预动作项与干预单，暂停当前执行步骤。",
+   "tags": [
+    "intervention",
+    "pause"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/routines.controller.ts"
+  },
+  {
+   "id": "step:routine-intervention-deliverable:pause-execution",
+   "type": "step",
+   "name": "暂停或恢复执行",
+   "summary": "通过执行策略的 pause/resume 动作控制远端会话。",
+   "tags": [
+    "pause",
+    "resume"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/task-worker/src/executor/execution-strategy.interface.ts"
+  },
+  {
+   "id": "step:routine-intervention-deliverable:resolve-intervention",
+   "type": "step",
+   "name": "处理干预决策",
+   "summary": "bot 侧查询并解析干预单，按决策与备注继续执行。",
+   "tags": [
+    "decision",
+    "bot"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/routine-bot.controller.ts"
+  },
+  {
+   "id": "step:routine-intervention-deliverable:register-deliverable",
+   "type": "step",
+   "name": "登记交付物",
+   "summary": "把执行产出登记为例程交付物并关联文件。",
+   "tags": [
+    "deliverable",
+    "artifact"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/routines/dto/add-deliverable.dto.ts"
+  },
+  {
+   "id": "step:routine-intervention-deliverable:complete-creation-routine",
+   "type": "step",
+   "name": "完成创建型例程",
+   "summary": "把草稿落成正式产物并收尾例程执行。",
+   "tags": [
+    "creation",
+    "complete"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/routines/dto/complete-creation.dto.ts"
+  },
+  {
+   "id": "domain:docs-knowledge-base",
+   "type": "domain",
+   "name": "文档与知识库",
+   "summary": "团队知识的沉淀与治理：工作区 Wiki 与协作文档以 folder9 为底层存储，写作走提案审批流，技能包以 SKILL.md 形式沉淀并授权给 agent，全站检索统一暴露检索入口。",
+   "tags": [
+    "wiki",
+    "document",
+    "skill",
+    "search",
+    "folder9"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entities": [
+     "Wiki",
+     "页面",
+     "提案",
+     "协作文档",
+     "版本",
+     "修改建议",
+     "技能",
+     "SKILL.md",
+     "检索索引"
+    ],
+    "businessRules": [
+     "wiki 路径拒绝空值、控制字符、绝对路径与 .. 段，防止目录穿越",
+     "权限按操作者是否 agent 分别取人类/agent 权限等级并做门槛校验",
+     "agent 默认以提案形式提交变更，人类审阅合入后才生效",
+     "技能创建时在 folder9 建目录并提交 SKILL.md 种子，随后签发读写令牌"
+    ],
+    "crossDomainInteractions": [
+     "文档变更结果通过 WebSocket 广播回频道",
+     "例程与技能共用 folder9 目录与令牌机制",
+     "agent 读写知识库受 AI agent 域的绑定关系约束"
+    ]
+   }
+  },
+  {
+   "id": "flow:create-wiki-page",
+   "type": "flow",
+   "name": "创建知识库并写入页面",
+   "summary": "创建工作区 wiki（slug、审批模式、人类/agent 权限）后在 folder9 建库挂载，校验路径与 frontmatter 后提交页面并广播。",
+   "tags": [
+    "wiki",
+    "folder9",
+    "page"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /wikis + PUT /wikis/:slug/pages",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:create-wiki-page:create-workspace-wiki",
+   "type": "step",
+   "name": "创建工作区 Wiki",
+   "summary": "校验 slug 与允许列表，写入 wiki 记录及审批模式与权限。",
+   "tags": [
+    "wiki",
+    "create"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/wikis.service.ts"
+  },
+  {
+   "id": "step:create-wiki-page:mount-folder9-backend",
+   "type": "step",
+   "name": "在 folder9 建库并挂载",
+   "summary": "调用 folder9 REST 接口建库，统一注入 PSK/token 并映射错误。",
+   "tags": [
+    "folder9",
+    "client"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/folder9-client.service.ts"
+  },
+  {
+   "id": "step:create-wiki-page:validate-page-path",
+   "type": "step",
+   "name": "校验页面路径安全",
+   "summary": "拒绝空值、控制字符、绝对路径与 .. 段，防止目录穿越。",
+   "tags": [
+    "security",
+    "path"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/wikis/utils/path-validation.ts"
+  },
+  {
+   "id": "step:create-wiki-page:commit-page-changes",
+   "type": "step",
+   "name": "提交页面变更",
+   "summary": "批量提交页面内容变更，必要时物化为提案而非直接写入。",
+   "tags": [
+    "commit",
+    "page"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/dto/commit-page.dto.ts"
+  },
+  {
+   "id": "step:create-wiki-page:cache-and-broadcast",
+   "type": "step",
+   "name": "缓存令牌并广播变更",
+   "summary": "缓存 wiki token，向前端广播页面与目录变更。",
+   "tags": [
+    "cache",
+    "websocket"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/wikis/wikis.controller.ts"
+  },
+  {
+   "id": "flow:wiki-proposal-review",
+   "type": "flow",
+   "name": "Wiki 提案审阅与合并",
+   "summary": "agent 的变更先物化为提案，人工在审阅页看 diff 后通过或拒绝，folder9 通过 webhook 回传审批事件并广播给工作区。",
+   "tags": [
+    "proposal",
+    "review",
+    "approval"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /wikis/:slug/proposals/:id/review",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:wiki-proposal-review:materialize-proposal",
+   "type": "step",
+   "name": "把变更物化为提案",
+   "summary": "按 wiki 审批模式把提交内容转成待审提案并记录作者。",
+   "tags": [
+    "proposal",
+    "workflow"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/wikis.service.ts"
+  },
+  {
+   "id": "step:wiki-proposal-review:review-diff",
+   "type": "step",
+   "name": "审阅页面差异",
+   "summary": "前端并排展示提案与现行页面的差异。",
+   "tags": [
+    "diff",
+    "ui"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/client/src/components/wiki/ProposalDiffView.tsx"
+  },
+  {
+   "id": "step:wiki-proposal-review:approve-or-reject",
+   "type": "step",
+   "name": "审批或拒绝提案",
+   "summary": "审阅面板提交通过/拒绝与意见，写回提案状态。",
+   "tags": [
+    "review",
+    "ui"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/client/src/components/wiki/ReviewPanel.tsx"
+  },
+  {
+   "id": "step:wiki-proposal-review:folder9-webhook-callback",
+   "type": "step",
+   "name": "folder9 回传审批事件",
+   "summary": "HMAC 校验原始请求体，解析提案审批事件并向工作区广播。",
+   "tags": [
+    "webhook",
+    "hmac"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/folder9-webhook.controller.ts"
+  },
+  {
+   "id": "step:wiki-proposal-review:check-wiki-permission",
+   "type": "step",
+   "name": "校验操作人权限等级",
+   "summary": "按操作者是人类还是 agent 选择对应权限等级并做门槛校验。",
+   "tags": [
+    "permission",
+    "guard"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/wikis/utils/permission.ts"
+  },
+  {
+   "id": "flow:document-suggestion-merge",
+   "type": "flow",
+   "name": "协作文档建议合入",
+   "summary": "协作文档按权限开放读写，修改以建议形式提交，审阅通过后合入并计算版本 diff、写入版本历史。",
+   "tags": [
+    "document",
+    "suggestion",
+    "version"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /documents/:id/suggestions",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:document-suggestion-merge:create-document",
+   "type": "step",
+   "name": "创建文档与可见权限",
+   "summary": "写入文档类型、初始内容与权限列表。",
+   "tags": [
+    "document",
+    "acl"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/documents/documents.service.ts"
+  },
+  {
+   "id": "step:document-suggestion-merge:submit-suggestion",
+   "type": "step",
+   "name": "提交修改建议",
+   "summary": "以建议形式提交变更，不直接改动正文。",
+   "tags": [
+    "suggestion",
+    "draft"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/documents/dto/submit-suggestion.dto.ts"
+  },
+  {
+   "id": "step:document-suggestion-merge:review-suggestion",
+   "type": "step",
+   "name": "审阅通过与拒绝",
+   "summary": "审阅接口按通过/拒绝动作合入或丢弃建议。",
+   "tags": [
+    "review",
+    "merge"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/documents/documents.controller.ts"
+  },
+  {
+   "id": "step:document-suggestion-merge:compute-version-diff",
+   "type": "step",
+   "name": "计算版本差异",
+   "summary": "对比版本内容并渲染差异视图供审阅。",
+   "tags": [
+    "diff",
+    "version"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/client/src/components/document/DiffView.tsx"
+  },
+  {
+   "id": "step:document-suggestion-merge:store-version-history",
+   "type": "step",
+   "name": "写入版本历史",
+   "summary": "把合入结果写入文档版本表供回溯。",
+   "tags": [
+    "version",
+    "history"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/database/src/schemas/document/document-versions.ts"
+  },
+  {
+   "id": "flow:skill-package-agent-access",
+   "type": "flow",
+   "name": "技能包创建与 agent 授权",
+   "summary": "人类创建技能后在 folder9 提交 SKILL.md 种子并设置 agentAccess，agent 侧以 bot 身份按访问级别只读列出与读取技能文件。",
+   "tags": [
+    "skill",
+    "agent-access",
+    "folder9"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /skills + GET /v1/bot/skills",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:skill-package-agent-access:create-skill",
+   "type": "step",
+   "name": "创建技能与种子文件",
+   "summary": "写入技能名称、图标、agent 权限与种子文件列表。",
+   "tags": [
+    "skill",
+    "create"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/skills/skills.service.ts"
+  },
+  {
+   "id": "step:skill-package-agent-access:commit-skill-md",
+   "type": "step",
+   "name": "在 folder9 提交 SKILL.md",
+   "summary": "在技能目录提交 SKILL.md 并签发读写令牌。",
+   "tags": [
+    "folder9",
+    "skill-md"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/wikis/folder9-client.service.ts"
+  },
+  {
+   "id": "step:skill-package-agent-access:set-agent-access",
+   "type": "step",
+   "name": "设置 agent 访问级别",
+   "summary": "通过访问控制面板配置 agent 可读/可写级别。",
+   "tags": [
+    "acl",
+    "ui"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/client/src/components/skills/AgentAccessControl.tsx"
+  },
+  {
+   "id": "step:skill-package-agent-access:resolve-bot-skill-access",
+   "type": "step",
+   "name": "解析 agent 访问级别",
+   "summary": "按 bot/agent 身份解析对技能的访问级别，供过滤或拒绝。",
+   "tags": [
+    "agent",
+    "permission"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/skills/agent-access.service.ts"
+  },
+  {
+   "id": "step:skill-package-agent-access:list-bot-skills",
+   "type": "step",
+   "name": "agent 只读列出技能",
+   "summary": "校验 bot 身份并按 agentAccess 过滤后返回技能列表。",
+   "tags": [
+    "bot",
+    "skills"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/skills/bot-skills.controller.ts"
+  },
+  {
+   "id": "flow:site-search",
+   "type": "flow",
+   "name": "全站检索",
+   "summary": "检索入口解析 Team9 风格查询语法，经缓存与 provider 抽象落到 PostgreSQL 全文匹配，索引随领域事件增量更新。",
+   "tags": [
+    "search",
+    "index",
+    "postgres"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "GET /search?q=",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:site-search:parse-team9-query",
+   "type": "step",
+   "name": "解析 Team9 风格查询语法",
+   "summary": "把字段前缀与过滤条件解析成结构化 SearchQuery。",
+   "tags": [
+    "parser",
+    "query"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/search/parsers/team9-style-query.parser.ts"
+  },
+  {
+   "id": "step:site-search:resolve-cache-and-provider",
+   "type": "step",
+   "name": "读缓存并选择 provider",
+   "summary": "解析查询、查缓存并调用 provider 聚合结果，屏蔽实现细节。",
+   "tags": [
+    "cache",
+    "provider"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/search/search.service.ts"
+  },
+  {
+   "id": "step:site-search:postgres-fulltext-match",
+   "type": "step",
+   "name": "PostgreSQL 全文匹配",
+   "summary": "对消息、频道、用户、文件等实体表做全文/模糊匹配并按相关度合并。",
+   "tags": [
+    "postgres",
+    "fulltext"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/search/providers/postgres-search.provider.ts"
+  },
+  {
+   "id": "step:site-search:index-domain-events",
+   "type": "step",
+   "name": "订阅事件写检索索引",
+   "summary": "订阅消息/频道/用户/文件领域事件写入索引并支持全量重建。",
+   "tags": [
+    "indexer",
+    "events"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/search/services/search-indexer.service.ts"
+  },
+  {
+   "id": "step:site-search:return-aggregated-results",
+   "type": "step",
+   "name": "返回聚合检索结果",
+   "summary": "注入租户上下文后调用检索服务并分页返回。",
+   "tags": [
+    "http",
+    "pagination"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/search/search.controller.ts"
+  },
+  {
+   "id": "domain:workspace-identity",
+   "type": "domain",
+   "name": "工作区与身份权限",
+   "summary": "多租户的入口层：邮箱验证码/Google/桌面端登录与 JWT 签发、工作区创建与邀请、新用户引导生成频道与员工，以及网关集群的会话路由、心跳与僵尸清理。",
+   "tags": [
+    "auth",
+    "workspace",
+    "tenant",
+    "jwt",
+    "cluster"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entities": [
+     "用户",
+     "工作区",
+     "租户",
+     "成员角色",
+     "邀请",
+     "引导记录",
+     "网关节点",
+     "会话"
+    ],
+    "businessRules": [
+     "登录需通过 Cloudflare Turnstile 人机校验，生产环境未配置密钥直接报错",
+     "工作区守卫从路由参数或 tenant 头解析工作区并注入 workspaceRole/tenantRole",
+     "角色守卫按 @WorkspaceRoles 元数据比对角色等级，不足返回 403",
+     "集群会话有 TTL，心跳续期，无心跳的会话被僵尸清理器断开"
+    ],
+    "crossDomainInteractions": [
+     "注册完成后自动开通默认工作区与个人助理",
+     "工作区角色决定频道成员资格与应用安装配额",
+     "邀请与在线状态事件通过协作域广播"
+    ]
+   }
+  },
+  {
+   "id": "flow:passwordless-login",
+   "type": "flow",
+   "name": "邮箱验证码登录",
+   "summary": "用户以邮箱验证码登录：先过人机校验取得登录挑战，校验验证码后签发 JWT，注册事件触发默认工作区初始化。",
+   "tags": [
+    "auth",
+    "otp",
+    "jwt"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /auth/login/start → POST /auth/login/verify",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:passwordless-login:start-login-challenge",
+   "type": "step",
+   "name": "发起登录挑战并做人机校验",
+   "summary": "创建登录挑战并用 Cloudflare Turnstile 校验 token。",
+   "tags": [
+    "turnstile",
+    "challenge"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/auth/turnstile.service.ts"
+  },
+  {
+   "id": "step:passwordless-login:verify-code",
+   "type": "step",
+   "name": "校验验证码",
+   "summary": "校验挑战 ID 与验证码，处理过期与重发。",
+   "tags": [
+    "otp",
+    "verify"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/auth/auth.controller.ts"
+  },
+  {
+   "id": "step:passwordless-login:issue-jwt",
+   "type": "step",
+   "name": "签发与刷新 JWT",
+   "summary": "签发访问令牌与刷新令牌，维护过期 token 清理。",
+   "tags": [
+    "jwt",
+    "refresh"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/auth/auth.service.ts"
+  },
+  {
+   "id": "step:passwordless-login:validate-jwt",
+   "type": "step",
+   "name": "守卫解析用户上下文",
+   "summary": "JWT 策略校验令牌并把用户上下文注入请求。",
+   "tags": [
+    "guard",
+    "jwt"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/auth/src/guards/auth.guard.ts"
+  },
+  {
+   "id": "step:passwordless-login:emit-user-registered",
+   "type": "step",
+   "name": "发布注册事件并初始化工作区",
+   "summary": "发出 user.registered 事件，监听方创建默认工作区与成员关系。",
+   "tags": [
+    "event",
+    "workspace"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/workspace.service.ts"
+  },
+  {
+   "id": "step:passwordless-login:send-verification-email",
+   "type": "step",
+   "name": "投递验证邮件",
+   "summary": "按模板渲染验证码/验证链接邮件并发送。",
+   "tags": [
+    "email",
+    "template"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/email/src/email.service.ts"
+  },
+  {
+   "id": "flow:invite-workspace-member",
+   "type": "flow",
+   "name": "邀请成员加入工作区",
+   "summary": "管理员按邮箱与角色创建邀请并投递邮件，受邀者接受后写入成员关系，角色守卫据此放行后续操作并广播成员加入事件。",
+   "tags": [
+    "invitation",
+    "member",
+    "role"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /workspaces/:id/invitations",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:invite-workspace-member:create-invitation",
+   "type": "step",
+   "name": "创建邀请",
+   "summary": "按邮箱与角色创建邀请码或邀请记录，校验管理角色。",
+   "tags": [
+    "invitation",
+    "rbac"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/workspace.controller.ts"
+  },
+  {
+   "id": "step:invite-workspace-member:deliver-invite-email",
+   "type": "step",
+   "name": "投递邀请邮件",
+   "summary": "渲染邀请/登录邮件模板并发送给受邀邮箱。",
+   "tags": [
+    "email",
+    "invite"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/email/src/email.service.ts"
+  },
+  {
+   "id": "step:invite-workspace-member:accept-invitation",
+   "type": "step",
+   "name": "接受邀请",
+   "summary": "校验邀请有效性与过期时间，绑定用户到工作区。",
+   "tags": [
+    "accept",
+    "tenant"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/workspace.service.ts"
+  },
+  {
+   "id": "step:invite-workspace-member:persist-member-role",
+   "type": "step",
+   "name": "写入成员与角色",
+   "summary": "写入成员关系并校验角色等级门槛。",
+   "tags": [
+    "member",
+    "role"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/guards/workspace-role.guard.ts"
+  },
+  {
+   "id": "step:invite-workspace-member:broadcast-member-joined",
+   "type": "step",
+   "name": "广播成员加入",
+   "summary": "清理用户资料缓存并向工作区成员广播成员变更。",
+   "tags": [
+    "event",
+    "websocket"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/im/users/user-profile-events.service.ts"
+  },
+  {
+   "id": "flow:workspace-onboarding",
+   "type": "flow",
+   "name": "新用户引导生成频道与员工",
+   "summary": "新工作区的引导状态机：按角色与任务上下文拼装提示词，由 LLM 结构化生成任务/频道/agent，落库并实际建频道、建个人助理与公共员工。",
+   "tags": [
+    "onboarding",
+    "llm",
+    "provisioning"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "POST /workspace/onboarding/generate",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:workspace-onboarding:read-onboarding-state",
+   "type": "step",
+   "name": "读取引导状态",
+   "summary": "查询角色目录与当前工作区引导进度。",
+   "tags": [
+    "onboarding",
+    "state"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/workspace/onboarding.controller.ts"
+  },
+  {
+   "id": "step:workspace-onboarding:build-generation-prompts",
+   "type": "step",
+   "name": "拼装生成提示词",
+   "summary": "按多语言措辞与角色上下文拼装任务、频道、agent 三组结构化 prompt。",
+   "tags": [
+    "prompt",
+    "i18n"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/onboarding.prompts.ts"
+  },
+  {
+   "id": "step:workspace-onboarding:generate-plan-llm",
+   "type": "step",
+   "name": "LLM 结构化生成方案",
+   "summary": "调用平台 LLM 生成任务/频道/agent 方案，维护引导状态机与自愈。",
+   "tags": [
+    "llm",
+    "structured"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/workspace/onboarding.service.ts"
+  },
+  {
+   "id": "step:workspace-onboarding:create-channels-and-staff",
+   "type": "step",
+   "name": "实际创建频道与员工",
+   "summary": "将方案落库并为工作区创建频道、个人助理与公共员工。",
+   "tags": [
+    "provisioning",
+    "staff"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/applications/common-staff.service.ts"
+  },
+  {
+   "id": "step:workspace-onboarding:complete-onboarding",
+   "type": "step",
+   "name": "完成引导",
+   "summary": "写入完成标记并进入工作区首页。",
+   "tags": [
+    "onboarding",
+    "ui"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/client/src/routes/_authenticated/onboarding.tsx"
+  },
+  {
+   "id": "flow:gateway-cluster-session",
+   "type": "flow",
+   "name": "网关集群在线路由",
+   "summary": "网关多实例通过 Redis 自注册与心跳维持在线，Socket.IO Redis adapter 做跨实例广播，会话模块维护用户到节点映射并清理僵尸连接。",
+   "tags": [
+    "cluster",
+    "socket-io",
+    "heartbeat"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "Socket.IO 连接建立",
+    "entryType": "event"
+   }
+  },
+  {
+   "id": "step:gateway-cluster-session:register-cluster-node",
+   "type": "step",
+   "name": "节点自注册并心跳",
+   "summary": "把本节点信息写入 Redis，定时心跳并维护连接数。",
+   "tags": [
+    "cluster",
+    "registry"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/cluster/cluster-node.service.ts"
+  },
+  {
+   "id": "step:gateway-cluster-session:sync-socket-adapter",
+   "type": "step",
+   "name": "多实例广播适配",
+   "summary": "基于 Redis pub/sub 创建 socket.io adapter 使网关多实例共享广播。",
+   "tags": [
+    "socket-io",
+    "redis"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/cluster/adapter/socket-redis-adapter.service.ts"
+  },
+  {
+   "id": "step:gateway-cluster-session:maintain-session-route",
+   "type": "step",
+   "name": "维护用户到节点映射",
+   "summary": "维护用户与网关节点映射、设备会话与心跳所需数据结构。",
+   "tags": [
+    "session",
+    "routing"
+   ],
+   "complexity": "complex",
+   "filePath": "apps/server/apps/gateway/src/cluster/session/session.service.ts"
+  },
+  {
+   "id": "step:gateway-cluster-session:renew-heartbeat-ttl",
+   "type": "step",
+   "name": "心跳续期会话 TTL",
+   "summary": "处理客户端 ping 返回 pong 并刷新会话活跃时间。",
+   "tags": [
+    "heartbeat",
+    "ttl"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/cluster/heartbeat/heartbeat.service.ts"
+  },
+  {
+   "id": "step:gateway-cluster-session:clean-zombie-sessions",
+   "type": "step",
+   "name": "清理僵尸连接",
+   "summary": "定时扫描无心跳会话，断开 socket 并广播离线事件。",
+   "tags": [
+    "cleanup",
+    "zombie"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/cluster/heartbeat/zombie-cleaner.service.ts"
+  },
+  {
+   "id": "domain:app-market-billing",
+   "type": "domain",
+   "name": "应用市场与计费",
+   "summary": "商业化的外围能力：应用目录与安装记录、订阅结账与支付回调、外部资源授权与用量日志，以及按部署版本控制的功能开关与配额。",
+   "tags": [
+    "marketplace",
+    "billing",
+    "resource",
+    "edition"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entities": [
+     "应用",
+     "安装记录",
+     "订阅",
+     "交易",
+     "外部资源",
+     "授权",
+     "用量日志",
+     "版本功能"
+    ],
+    "businessRules": [
+     "安装记录需做重复安装与配额校验，查询时对 secrets 脱敏",
+     "支付回调校验服务密钥后按 paymentType 区分订阅与充值结果",
+     "外部资源的创建者权限与授权关系共同决定访问",
+     "功能开关由部署版本矩阵决定，未开启的功能直接 403"
+    ],
+    "crossDomainInteractions": [
+     "安装应用会创建 bot 与 OpenClaw 实例",
+     "套餐与角色共同决定工作区管理权限"
+    ]
+   }
+  },
+  {
+   "id": "flow:install-market-application",
+   "type": "flow",
+   "name": "浏览并安装市场应用",
+   "summary": "用户从应用目录挑选应用，服务端做重复安装与配额校验后执行安装处理器，配置更新时脱敏，卸载时清理关联资源。",
+   "tags": [
+    "application",
+    "install",
+    "marketplace"
+   ],
+   "complexity": "complex",
+   "domainMeta": {
+    "entryPoint": "GET /applications → POST /installed-applications",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:install-market-application:list-visible-applications",
+   "type": "step",
+   "name": "列出可见应用",
+   "summary": "按租户返回全部应用与可见应用列表。",
+   "tags": [
+    "catalog",
+    "tenant"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/applications/applications.controller.ts"
+  },
+  {
+   "id": "step:install-market-application:validate-install-record",
+   "type": "step",
+   "name": "校验重复安装与配额",
+   "summary": "安装记录唯一性与配额校验，冲突时拒绝。",
+   "tags": [
+    "quota",
+    "validation"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/installed-applications.service.ts"
+  },
+  {
+   "id": "step:install-market-application:run-install-handler",
+   "type": "step",
+   "name": "执行安装处理器",
+   "summary": "按应用类型调用对应 handler 完成资源创建。",
+   "tags": [
+    "handler",
+    "install"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/handlers/index.ts"
+  },
+  {
+   "id": "step:install-market-application:update-app-config",
+   "type": "step",
+   "name": "更新配置并脱敏输出",
+   "summary": "更新已安装应用配置，读取时对 secrets 脱敏。",
+   "tags": [
+    "config",
+    "redaction"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/installed-applications.controller.ts"
+  },
+  {
+   "id": "step:install-market-application:uninstall-cleanup",
+   "type": "step",
+   "name": "卸载并清理资源",
+   "summary": "删除关联 bot、频道与实例，回收安装记录。",
+   "tags": [
+    "uninstall",
+    "cleanup"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/applications/handlers/base-model-staff.handler.ts"
+  },
+  {
+   "id": "flow:subscription-checkout",
+   "type": "flow",
+   "name": "订阅结账与支付回调",
+   "summary": "工作区管理员查询产品目录并创建结账会话，支付成功后 Billing Hub 回调验签，结果投递到 PostHog 与业务事件，账单页展示订阅与交易。",
+   "tags": [
+    "billing",
+    "checkout",
+    "webhook"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /workspace/billing/checkout → POST /billing-hub/webhook",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:subscription-checkout:list-billing-catalog",
+   "type": "step",
+   "name": "查询产品目录",
+   "summary": "代理 Billing Hub 的产品目录、订阅、余额与交易分页查询。",
+   "tags": [
+    "billing",
+    "catalog"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/billing-hub/billing-hub.service.ts"
+  },
+  {
+   "id": "step:subscription-checkout:create-checkout-session",
+   "type": "step",
+   "name": "创建结账会话",
+   "summary": "按角色限制校验后创建结账会话或客户门户链接。",
+   "tags": [
+    "checkout",
+    "rbac"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/workspace/workspace-billing.controller.ts"
+  },
+  {
+   "id": "step:subscription-checkout:receive-payment-webhook",
+   "type": "step",
+   "name": "接收支付回调并验签",
+   "summary": "校验服务密钥后接收支付成功事件，按 paymentType 分发。",
+   "tags": [
+    "webhook",
+    "signature"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/billing-hub/billing-hub-webhook.controller.ts"
+  },
+  {
+   "id": "step:subscription-checkout:forward-analytics-event",
+   "type": "step",
+   "name": "投递分析事件",
+   "summary": "把订阅/充值结果投递到 PostHog 与业务事件总线。",
+   "tags": [
+    "posthog",
+    "analytics"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/posthog/src/posthog.service.ts"
+  },
+  {
+   "id": "step:subscription-checkout:query-billing-overview",
+   "type": "step",
+   "name": "展示账单概览",
+   "summary": "前端订阅页展示当前套餐、账单概览与交易记录。",
+   "tags": [
+    "ui",
+    "subscription"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/client/src/routes/_authenticated/subscription.tsx"
+  },
+  {
+   "id": "flow:external-resource-authorize",
+   "type": "flow",
+   "name": "外部资源授权与用量",
+   "summary": "租户登记外部资源后按对象授权或撤权，使用前做创建者与授权校验，每次使用写用量日志并支持心跳上报。",
+   "tags": [
+    "resource",
+    "acl",
+    "usage"
+   ],
+   "complexity": "moderate",
+   "domainMeta": {
+    "entryPoint": "POST /resources/:id/authorize",
+    "entryType": "http"
+   }
+  },
+  {
+   "id": "step:external-resource-authorize:create-external-resource",
+   "type": "step",
+   "name": "创建外部资源",
+   "summary": "按类型、名称与配置创建租户内外部资源。",
+   "tags": [
+    "resource",
+    "create"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/resources/resources.service.ts"
+  },
+  {
+   "id": "step:external-resource-authorize:authorize-resource",
+   "type": "step",
+   "name": "授权给对象",
+   "summary": "按对象类型与对象 ID 建立授权关系，支持撤权。",
+   "tags": [
+    "authorize",
+    "acl"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/resources/dto/authorize-resource.dto.ts"
+  },
+  {
+   "id": "step:external-resource-authorize:check-creator-permission",
+   "type": "step",
+   "name": "校验创建者与授权权限",
+   "summary": "控制器层校验调用者身份与资源创建者权限后转发。",
+   "tags": [
+    "permission",
+    "guard"
+   ],
+   "complexity": "moderate",
+   "filePath": "apps/server/apps/gateway/src/resources/resources.controller.ts"
+  },
+  {
+   "id": "step:external-resource-authorize:record-usage-log",
+   "type": "step",
+   "name": "写使用日志与心跳",
+   "summary": "记录资源使用日志与心跳时间，供计量与排障。",
+   "tags": [
+    "usage",
+    "log"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/libs/database/src/schemas/resource/resource-usage-logs.ts"
+  },
+  {
+   "id": "flow:edition-feature-quota",
+   "type": "flow",
+   "name": "版本功能与配额门控",
+   "summary": "部署版本决定可用的模块与配额：版本服务读取功能矩阵，路由用 @RequireFeature 声明依赖，FeatureGuard 在请求期校验并拒绝未开启的功能。",
+   "tags": [
+    "edition",
+    "feature-flag",
+    "quota"
+   ],
+   "complexity": "simple",
+   "domainMeta": {
+    "entryPoint": "应用启动时按部署版本装配 + 路由 @RequireFeature",
+    "entryType": "manual"
+   }
+  },
+  {
+   "id": "step:edition-feature-quota:load-edition-matrix",
+   "type": "step",
+   "name": "读取版本功能矩阵",
+   "summary": "加载社区版/企业版的模块、功能开关与配额上限配置。",
+   "tags": [
+    "edition",
+    "config"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/edition/edition.enum.ts"
+  },
+  {
+   "id": "step:edition-feature-quota:resolve-edition-config",
+   "type": "step",
+   "name": "解析当前部署版本",
+   "summary": "按环境读取当前部署版本并提供功能判断与配额查询。",
+   "tags": [
+    "edition",
+    "runtime"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/edition/edition.service.ts"
+  },
+  {
+   "id": "step:edition-feature-quota:require-feature-metadata",
+   "type": "step",
+   "name": "路由声明所需功能",
+   "summary": "用 @RequireFeature 装饰器把路由依赖写入元数据。",
+   "tags": [
+    "decorator",
+    "metadata"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/edition/decorators/require-feature.decorator.ts"
+  },
+  {
+   "id": "step:edition-feature-quota:enforce-feature-guard",
+   "type": "step",
+   "name": "守卫校验放行",
+   "summary": "FeatureGuard 读取元数据校验版本是否开启对应功能，否则拒绝。",
+   "tags": [
+    "guard",
+    "enforcement"
+   ],
+   "complexity": "simple",
+   "filePath": "apps/server/apps/gateway/src/edition/guards/feature.guard.ts"
+  }
+ ],
+ "edges": [
+  {
+   "source": "domain:team-im-collaboration",
+   "target": "flow:send-channel-message",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:send-channel-message",
+   "target": "step:send-channel-message:verify-channel-membership",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:send-channel-message",
+   "target": "step:send-channel-message:sanitize-message-content",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:send-channel-message",
+   "target": "step:send-channel-message:persist-and-sequence",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:send-channel-message",
+   "target": "step:send-channel-message:route-to-online-gateway",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:send-channel-message",
+   "target": "step:send-channel-message:broadcast-and-fanout",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:team-im-collaboration",
+   "target": "flow:sync-and-read-receipt",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:sync-and-read-receipt",
+   "target": "step:sync-and-read-receipt:pull-by-channel-cursor",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:sync-and-read-receipt",
+   "target": "step:sync-and-read-receipt:replenish-sender-info",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:sync-and-read-receipt",
+   "target": "step:sync-and-read-receipt:report-client-ack",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:sync-and-read-receipt",
+   "target": "step:sync-and-read-receipt:track-delivery-read-state",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:sync-and-read-receipt",
+   "target": "step:sync-and-read-receipt:refresh-online-presence",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:team-im-collaboration",
+   "target": "flow:channel-view-board",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:channel-view-board",
+   "target": "step:channel-view-board:seed-channel-tabs",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:channel-view-board",
+   "target": "step:channel-view-board:create-view-config",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:channel-view-board",
+   "target": "step:channel-view-board:query-by-filter-sort",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:channel-view-board",
+   "target": "step:channel-view-board:bind-message-properties",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:channel-view-board",
+   "target": "step:channel-view-board:render-table-board",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:team-im-collaboration",
+   "target": "flow:mention-notification-delivery",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:mention-notification-delivery",
+   "target": "step:mention-notification-delivery:parse-mentions",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:mention-notification-delivery",
+   "target": "step:mention-notification-delivery:derive-notification-task",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:mention-notification-delivery",
+   "target": "step:mention-notification-delivery:persist-notification",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:mention-notification-delivery",
+   "target": "step:mention-notification-delivery:multi-channel-delivery",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:mention-notification-delivery",
+   "target": "step:mention-notification-delivery:web-push-fallback",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "flow:install-ai-staff",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:browse-application-catalog",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:dispatch-install-handler",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:create-bot-shadow-user",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:generate-persona-avatar",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:record-installation",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:install-ai-staff",
+   "target": "step:install-ai-staff:notify-websocket",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "flow:install-recommended-staff",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:install-recommended-staff",
+   "target": "step:install-recommended-staff:list-recommended-staff",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:install-recommended-staff",
+   "target": "step:install-recommended-staff:fetch-hive-templates",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:install-recommended-staff",
+   "target": "step:install-recommended-staff:create-bot-and-mentor-channel",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:install-recommended-staff",
+   "target": "step:install-recommended-staff:register-hive-agent",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "flow:agent-topic-session",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:create-topic-channel",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:bind-agent-session",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:authenticate-bot-token",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:stream-agent-output",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:finalize-message",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:agent-topic-session",
+   "target": "step:agent-topic-session:auto-generate-title",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "flow:connect-ahand-device",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:register-device-token",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:extend-session-blueprint",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:verify-webhook-signature",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:publish-device-events",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:push-to-owner-room",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:connect-ahand-device",
+   "target": "step:connect-ahand-device:relay-job-stream",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "flow:openclaw-instance-lifecycle",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:openclaw-instance-lifecycle",
+   "target": "step:openclaw-instance-lifecycle:install-openclaw-app",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:openclaw-instance-lifecycle",
+   "target": "step:openclaw-instance-lifecycle:open-dm-channels",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:openclaw-instance-lifecycle",
+   "target": "step:openclaw-instance-lifecycle:query-instance-activity",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:openclaw-instance-lifecycle",
+   "target": "step:openclaw-instance-lifecycle:restart-instance",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:openclaw-instance-lifecycle",
+   "target": "step:openclaw-instance-lifecycle:run-openclaw-strategy",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "flow:create-routine-with-skill",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:create-routine-record",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:ensure-routine-folder",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:provision-skill-md",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:validate-skill-md",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:issue-folder-token",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:create-routine-with-skill",
+   "target": "step:create-routine-with-skill:broadcast-routine-change",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "flow:scheduled-routine-run",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:configure-trigger-schedule",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.1
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:poll-triggers-with-lock",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:dispatch-command",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:consume-execution-command",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:select-execution-strategy",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:report-steps-status",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.9
+  },
+  {
+   "source": "flow:scheduled-routine-run",
+   "target": "step:scheduled-routine-run:stream-progress",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "flow:channel-message-trigger",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:channel-message-trigger",
+   "target": "step:channel-message-trigger:create-task-run",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:channel-message-trigger",
+   "target": "step:channel-message-trigger:match-channel-trigger-rules",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:channel-message-trigger",
+   "target": "step:channel-message-trigger:start-hive-session",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:channel-message-trigger",
+   "target": "step:channel-message-trigger:track-task-timeout",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:channel-message-trigger",
+   "target": "step:channel-message-trigger:handle-taskcast-webhook",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "flow:routine-intervention-deliverable",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:routine-intervention-deliverable",
+   "target": "step:routine-intervention-deliverable:create-intervention",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:routine-intervention-deliverable",
+   "target": "step:routine-intervention-deliverable:pause-execution",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:routine-intervention-deliverable",
+   "target": "step:routine-intervention-deliverable:resolve-intervention",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:routine-intervention-deliverable",
+   "target": "step:routine-intervention-deliverable:register-deliverable",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:routine-intervention-deliverable",
+   "target": "step:routine-intervention-deliverable:complete-creation-routine",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "flow:create-wiki-page",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:create-wiki-page",
+   "target": "step:create-wiki-page:create-workspace-wiki",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:create-wiki-page",
+   "target": "step:create-wiki-page:mount-folder9-backend",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:create-wiki-page",
+   "target": "step:create-wiki-page:validate-page-path",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:create-wiki-page",
+   "target": "step:create-wiki-page:commit-page-changes",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:create-wiki-page",
+   "target": "step:create-wiki-page:cache-and-broadcast",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "flow:wiki-proposal-review",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:wiki-proposal-review",
+   "target": "step:wiki-proposal-review:materialize-proposal",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:wiki-proposal-review",
+   "target": "step:wiki-proposal-review:review-diff",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:wiki-proposal-review",
+   "target": "step:wiki-proposal-review:approve-or-reject",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:wiki-proposal-review",
+   "target": "step:wiki-proposal-review:folder9-webhook-callback",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:wiki-proposal-review",
+   "target": "step:wiki-proposal-review:check-wiki-permission",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "flow:document-suggestion-merge",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:document-suggestion-merge",
+   "target": "step:document-suggestion-merge:create-document",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:document-suggestion-merge",
+   "target": "step:document-suggestion-merge:submit-suggestion",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:document-suggestion-merge",
+   "target": "step:document-suggestion-merge:review-suggestion",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:document-suggestion-merge",
+   "target": "step:document-suggestion-merge:compute-version-diff",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:document-suggestion-merge",
+   "target": "step:document-suggestion-merge:store-version-history",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "flow:skill-package-agent-access",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:skill-package-agent-access",
+   "target": "step:skill-package-agent-access:create-skill",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:skill-package-agent-access",
+   "target": "step:skill-package-agent-access:commit-skill-md",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:skill-package-agent-access",
+   "target": "step:skill-package-agent-access:set-agent-access",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:skill-package-agent-access",
+   "target": "step:skill-package-agent-access:resolve-bot-skill-access",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:skill-package-agent-access",
+   "target": "step:skill-package-agent-access:list-bot-skills",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "flow:site-search",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:site-search",
+   "target": "step:site-search:parse-team9-query",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:site-search",
+   "target": "step:site-search:resolve-cache-and-provider",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:site-search",
+   "target": "step:site-search:postgres-fulltext-match",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:site-search",
+   "target": "step:site-search:index-domain-events",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:site-search",
+   "target": "step:site-search:return-aggregated-results",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "flow:passwordless-login",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:start-login-challenge",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:verify-code",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.3
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:issue-jwt",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:validate-jwt",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.7
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:emit-user-registered",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:passwordless-login",
+   "target": "step:passwordless-login:send-verification-email",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "flow:invite-workspace-member",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:invite-workspace-member",
+   "target": "step:invite-workspace-member:create-invitation",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:invite-workspace-member",
+   "target": "step:invite-workspace-member:deliver-invite-email",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:invite-workspace-member",
+   "target": "step:invite-workspace-member:accept-invitation",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:invite-workspace-member",
+   "target": "step:invite-workspace-member:persist-member-role",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:invite-workspace-member",
+   "target": "step:invite-workspace-member:broadcast-member-joined",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "flow:workspace-onboarding",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:workspace-onboarding",
+   "target": "step:workspace-onboarding:read-onboarding-state",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:workspace-onboarding",
+   "target": "step:workspace-onboarding:build-generation-prompts",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:workspace-onboarding",
+   "target": "step:workspace-onboarding:generate-plan-llm",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:workspace-onboarding",
+   "target": "step:workspace-onboarding:create-channels-and-staff",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:workspace-onboarding",
+   "target": "step:workspace-onboarding:complete-onboarding",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "flow:gateway-cluster-session",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:gateway-cluster-session",
+   "target": "step:gateway-cluster-session:register-cluster-node",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:gateway-cluster-session",
+   "target": "step:gateway-cluster-session:sync-socket-adapter",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:gateway-cluster-session",
+   "target": "step:gateway-cluster-session:maintain-session-route",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:gateway-cluster-session",
+   "target": "step:gateway-cluster-session:renew-heartbeat-ttl",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:gateway-cluster-session",
+   "target": "step:gateway-cluster-session:clean-zombie-sessions",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "flow:install-market-application",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:install-market-application",
+   "target": "step:install-market-application:list-visible-applications",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:install-market-application",
+   "target": "step:install-market-application:validate-install-record",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:install-market-application",
+   "target": "step:install-market-application:run-install-handler",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:install-market-application",
+   "target": "step:install-market-application:update-app-config",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:install-market-application",
+   "target": "step:install-market-application:uninstall-cleanup",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "flow:subscription-checkout",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:subscription-checkout",
+   "target": "step:subscription-checkout:list-billing-catalog",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:subscription-checkout",
+   "target": "step:subscription-checkout:create-checkout-session",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.4
+  },
+  {
+   "source": "flow:subscription-checkout",
+   "target": "step:subscription-checkout:receive-payment-webhook",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.6
+  },
+  {
+   "source": "flow:subscription-checkout",
+   "target": "step:subscription-checkout:forward-analytics-event",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:subscription-checkout",
+   "target": "step:subscription-checkout:query-billing-overview",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "flow:external-resource-authorize",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:external-resource-authorize",
+   "target": "step:external-resource-authorize:create-external-resource",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:external-resource-authorize",
+   "target": "step:external-resource-authorize:authorize-resource",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:external-resource-authorize",
+   "target": "step:external-resource-authorize:check-creator-permission",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:external-resource-authorize",
+   "target": "step:external-resource-authorize:record-usage-log",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "flow:edition-feature-quota",
+   "type": "contains_flow",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "flow:edition-feature-quota",
+   "target": "step:edition-feature-quota:load-edition-matrix",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.2
+  },
+  {
+   "source": "flow:edition-feature-quota",
+   "target": "step:edition-feature-quota:resolve-edition-config",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.5
+  },
+  {
+   "source": "flow:edition-feature-quota",
+   "target": "step:edition-feature-quota:require-feature-metadata",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 0.8
+  },
+  {
+   "source": "flow:edition-feature-quota",
+   "target": "step:edition-feature-quota:enforce-feature-guard",
+   "type": "flow_step",
+   "direction": "forward",
+   "weight": 1
+  },
+  {
+   "source": "domain:team-im-collaboration",
+   "target": "domain:ai-agent-workforce",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "频道 @mention 或主题会话把消息交给 AI agent 域创建 agent 会话并流式回传",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "domain:routine-automation",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "agent 通过 bot 接口上报例程执行步骤、交付物与人工干预决策",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "domain:docs-knowledge-base",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "例程创建与执行前依赖 folder9 目录、SKILL.md 与文档令牌",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:docs-knowledge-base",
+   "target": "domain:team-im-collaboration",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "Wiki 提案审批与页面变更通过 WebSocket 广播回工作区频道",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "domain:team-im-collaboration",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "工作区成员、角色与在线状态决定频道成员资格与消息可见性",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:workspace-identity",
+   "target": "domain:ai-agent-workforce",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "注册事件自动初始化默认工作区与个人助理，登录令牌用于 agent 接口鉴权",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "domain:ai-agent-workforce",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "安装市场应用时创建 bot 影子用户与 OpenClaw 实例",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:app-market-billing",
+   "target": "domain:workspace-identity",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "套餐订阅与版本功能开关决定工作区管理权限与配额",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:ai-agent-workforce",
+   "target": "domain:docs-knowledge-base",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "agent 以 bot 身份读写 Wiki 与技能包，受 agentAccess 权限约束",
+   "weight": 0.6
+  },
+  {
+   "source": "domain:routine-automation",
+   "target": "domain:team-im-collaboration",
+   "type": "cross_domain",
+   "direction": "forward",
+   "description": "例程执行进度与交付结果回写任务频道并广播给订阅客户端",
+   "weight": 0.6
+  }
+ ],
+ "layers": [],
+ "tour": []
+}

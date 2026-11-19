@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 车间 · 查看器</title>
+<link rel="icon" type="image/png" href="system/logo.png">
+<link rel="stylesheet" href="system/styles.css">
+</head>
+<body class="page-viewer">
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="index.html"><img class="brand-logo topbar-logo" src="system/logo.png" alt="">← 项目列表</a>
+    <div class="project-title" id="project-title">加载中…</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="overview" type="button">概览</button>
+      <button class="tab" data-tab="domain" type="button">领域图谱</button>
+      <button class="tab" data-tab="knowledge" type="button">知识图谱</button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <div class="top-search">
+      <input id="search-input" type="search" placeholder="搜索节点名称或路径" autocomplete="off" disabled>
+      <div class="search-results" id="search-results"></div>
+    </div>
+    <div class="zoom-controls">
+      <button class="icon-btn" id="zoom-out" type="button" title="缩小">−</button>
+      <button class="icon-btn" id="zoom-in" type="button" title="放大">+</button>
+      <button class="icon-btn wide" id="zoom-fit" type="button" title="适应窗口">适应</button>
+      <button class="icon-btn wide" id="tour-toggle" type="button" title="切换导览">导览</button>
+    </div>
+  </header>
+
+  <div class="filter-bar" id="filter-bar">
+    <section class="filter-group" id="filters-section">
+      <div class="filter-head">
+        <span class="filter-title">节点类型</span>
+        <button class="filter-all" id="node-types-all" type="button" title="全选 / 全不选">全选</button>
+      </div>
+      <div class="filter-items" id="node-type-filters"></div>
+    </section>
+    <section class="filter-group" id="edge-filters-section">
+      <div class="filter-head">
+        <span class="filter-title">关系类型</span>
+        <button class="filter-all" id="edge-types-all" type="button" title="全选 / 全不选">全选</button>
+      </div>
+      <div class="filter-items" id="edge-type-filters"></div>
+    </section>
+  </div>
+
+  <div class="workspace">
+    <aside class="sidebar left">
+      <section class="panel-section" id="layers-section">
+        <h3 class="panel-title">图层 <button class="filter-all" id="layers-all" type="button" title="全选 / 全不选">全选</button></h3>
+        <div id="layer-filters"></div>
+      </section>
+    </aside>
+
+    <div class="canvas-wrap" id="canvas-wrap">
+      <div class="canvas-world" id="canvas-world">
+        <svg id="edge-layer" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div id="node-layer"></div>
+      </div>
+
+      <div class="overview" id="overview"></div>
+
+      <div class="tour-bar hidden" id="tour-bar"></div>
+      <div class="canvas-hint" id="canvas-hint">拖拽平移 · 滚轮缩放 · 点击节点查看详情</div>
+
+      <div class="loading" id="loading">正在加载项目数据…</div>
+    </div>
+
+    <aside class="sidebar right" id="details">
+      <div class="detail-empty">在左侧画布中选择一个节点，这里会显示它的说明、标签与关联关系。</div>
+    </aside>
+
+    <button class="collapse-btn left" id="toggle-left" type="button" title="收起左侧栏">‹</button>
+    <button class="collapse-btn right" id="toggle-right" type="button" title="收起右侧栏">›</button>
+  </div>
+</div>
+
+<script src="system/manifest.js"></script>
+<script src="system/viewer.js"></script>
+</body>
+</html>
