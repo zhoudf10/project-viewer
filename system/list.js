@@ -1,6 +1,10 @@
 (function () {
   'use strict';
 
+  // 项目数据子文件夹：datas/<项目名>/ 下存放 knowledge-graph.json 等分析文件的目录。
+  // 修改此值后运行 python bliud.py 重新构建即可生效（构建脚本会动态读取这里）。
+  var UA_DATA_SUBFOLDER = '.ua';
+
   var manifest = window.UA_MANIFEST || { projects: [] };
   var projects = Array.isArray(manifest.projects) ? manifest.projects : [];
 
@@ -146,13 +150,10 @@
 
     if (!projects.length) {
       empty.textContent = '';
-      empty.appendChild(document.createTextNode('没有可显示的项目。请把分析结果放到 '));
-      var code = el('code', null, 'datas/<项目名>/.ai_machine/');
-      empty.appendChild(code);
-      empty.appendChild(document.createTextNode('，然后运行 '));
-      var cmd = el('code', null, 'python bliud.py');
+      empty.appendChild(document.createTextNode('没有可显示的项目。运行 '));
+      var cmd = el('code', null, 'python bliud.py datas_dir=<项目目录>');
       empty.appendChild(cmd);
-      empty.appendChild(document.createTextNode(' 重新生成数据。'));
+      empty.appendChild(document.createTextNode(' 导入项目后刷新本页。'));
     }
   }
 
